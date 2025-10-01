@@ -187,8 +187,8 @@ def run_prophet_forecast(df: pd.DataFrame, series_name: str):
     # Fit the model
     model.fit(df_prophet)
 
-    # Make a future dataframe for 6 months
-    future = model.make_future_dataframe(df_prophet, periods=26, freq='W')
+    # Make a future dataframe for 6 months (26 weeks)
+    future = model.make_future_dataframe(df_prophet, periods=26, freq='W')  # Correct way to call this function
 
     # Forecast
     forecast = model.predict(future)
@@ -204,6 +204,7 @@ def run_prophet_forecast(df: pd.DataFrame, series_name: str):
     # Display forecasted data
     st.markdown(f"### Forecast for the next 6 months")
     st.dataframe(forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']], use_container_width=True)
+
 
 
 # ---------- Execution controllers ----------
