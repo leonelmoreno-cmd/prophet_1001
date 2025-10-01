@@ -166,7 +166,6 @@ def parse_trends_csv(file_bytes: bytes) -> tuple[pd.DataFrame, str]:
     st.write(df.head())
 
     return df, series_label
-
 def run_prophet_forecast(df: pd.DataFrame, series_name: str):
     """Run Prophet forecasting for the next 6 months."""
     if df.empty:
@@ -177,6 +176,7 @@ def run_prophet_forecast(df: pd.DataFrame, series_name: str):
         st.error(f"Column '{series_name}' not found in the dataset.")
         st.stop()
 
+    # Prepare the data for Prophet
     df_prophet = df.reset_index()[['date', series_name]]
     df_prophet.columns = ['ds', 'y']
 
@@ -187,25 +187,23 @@ def run_prophet_forecast(df: pd.DataFrame, series_name: str):
     # Fit the model
     model.fit(df_prophet)
 
-    # Make a future dataframe for 6 months (26 weeks)
-    future = model.make_future_dataframe(df_prophet, periods=26, freq='W')  # Correct way to call this function
+    # Generate future dates for forecasting
+    future = model.make_future_dataframe(df_prophet, periods=26, freq='W')  # 26 weeks (6 months)
 
-    # Forecast
+    # Forecast the future values
     forecast = model.predict(future)
 
     # Plot the forecast
     fig = model.plot(forecast)
     st.plotly_chart(fig, use_container_width=True)
     
-    # Show the forecast components
+    # Show the forecast components (trend, holidays, etc.)
     fig2 = model.plot_components(forecast)
     st.plotly_chart(fig2, use_container_width=True)
 
-    # Display forecasted data
+    # Display the forecast data
     st.markdown(f"### Forecast for the next 6 months")
     st.dataframe(forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']], use_container_width=True)
-
-
 
 # ---------- Execution controllers ----------
 def run_request_mode():
