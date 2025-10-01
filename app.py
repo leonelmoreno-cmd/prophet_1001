@@ -92,6 +92,11 @@ def parse_trends_csv(file_bytes: bytes) -> tuple[pd.DataFrame, str]:
     Returns (df, series_label) where df has a DatetimeIndex and a single numeric column.
     """
     text = file_bytes.decode("utf-8-sig", errors="replace")
+    
+    # Debugging: Show first few lines of the uploaded file to help understand the format
+    st.write("First 5 lines of CSV:")
+    st.write(text.splitlines()[:5])
+
     # Find the header line by scanning until we see a row whose first cell is Week/Semana/Date/Fecha
     lines = [ln for ln in text.splitlines() if ln.strip() != ""]
     header_idx = -1
@@ -100,7 +105,9 @@ def parse_trends_csv(file_bytes: bytes) -> tuple[pd.DataFrame, str]:
         for sep in [",", ";", "\t"]:
             parts = [p.strip() for p in ln.split(sep)]
             if len(parts) >= 2:
-                if "date" in parts[0].lower():
+                # Look for column names that might be related to dates
+                possible_date_columns = ["week", "semana", "date", "fecha"]
+                if any(p.lower() in possible_date_columns for p in parts):
                     header_idx = i
                     delimiter = sep
                     break
@@ -113,6 +120,10 @@ def parse_trends_csv(file_bytes: bytes) -> tuple[pd.DataFrame, str]:
     # Rebuild the CSV from header onward and let pandas parse
     content = "\n".join(lines[header_idx:])
     df_raw = pd.read_csv(io.StringIO(content), sep=None, engine="python")
+
+    # Debugging: Show the columns of the CSV after parsing
+    st.write("Columns after parsing CSV:")
+    st.write(df_raw.columns)
 
     # Identify date column name (en/es)
     date_candidates = [c for c in df_raw.columns if c.strip().lower() in {"week", "semana", "date", "fecha"}]
@@ -149,6 +160,10 @@ def parse_trends_csv(file_bytes: bytes) -> tuple[pd.DataFrame, str]:
 
     # Use date as index to match fetch_trends() shape
     df = df.set_index("date")
+
+    # Debugging: Show the dataframe after cleaning
+    st.write("Cleaned DataFrame:")
+    st.write(df.head())
 
     return df, series_label
 
