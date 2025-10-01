@@ -205,6 +205,7 @@ def run_prophet_forecast(df: pd.DataFrame, series_name: str):
     st.markdown(f"### Forecast for the next 6 months")
     st.dataframe(forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']], use_container_width=True)
 
+
 # ---------- Execution controllers ----------
 def run_request_mode():
     if not kw.strip():
