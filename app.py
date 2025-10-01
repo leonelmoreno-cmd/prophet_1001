@@ -181,7 +181,8 @@ def run_prophet_forecast(df: pd.DataFrame, series_name: str):
     df_prophet.columns = ['ds', 'y']
 
     # Instantiate Prophet model
-    model = Prophet(weekly_seasonality=True, holidays=Prophet.make_holidays_df(year_list=[2025], country='US'))
+    model = Prophet(weekly_seasonality=True)
+    model.add_country_holidays(country_name='US')  # Add built-in holidays for the US
     
     # Fit the model
     model.fit(df_prophet)
