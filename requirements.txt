@@ -1,6 +1,9 @@
+urllib3<2
 streamlit
 pytrends
-prophet
-plotly
+statsmodels
+plotly>=4
 pandas
 numpy
+packaging
+prophet
