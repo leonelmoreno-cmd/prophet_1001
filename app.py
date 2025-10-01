@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# Análisis de Demanda JC — Google Trends + Prophet
-# Alcance fijo: US, últimos 5 años, en-US
-# Mejores prácticas: reintentos/retraso, almacenamiento en caché, validación, mensajes de error estructurados.
+# Demand Analysis JC — Google Trends + Prophet Forecasting
+# Fixed scope: US, last 5 years, en-US
+# Best practices: retries/backoff, caching, validation, structured error messages.
 
 import io
 import re
@@ -11,148 +11,234 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from prophet import Prophet
-from prophet.plot import plot_forecast_component
+from pytrends.request import TrendReq
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import plotly.express as px
+from datetime import datetime, timedelta
 
-# Configuración básica de Streamlit
-st.set_page_config(page_title="Análisis de Demanda JC", layout="wide")
-st.title("Análisis de Demanda JC")
-st.caption("Google Trends (US, últimos 5 años, en-US) → Prophet → Plotly → Mejores decisiones")
+# ---------- Streamlit basic setup ----------
+st.set_page_config(page_title="Demand Analysis JC", layout="wide")
+st.title("Demand Analysis JC")
+st.caption("Google Trends (US, last 5y, en-US) → Prophet Forecasting → Plotly → Better decisions")
 
-# Entradas de la interfaz de usuario
-kw = st.text_input("Palabra clave (obligatoria para el modo de solicitud)", value="", placeholder="ej. estufa de cohete")
+# ---------- UI inputs ----------
+kw = st.text_input("Keyword (required for Request mode)", value="", placeholder="e.g., rocket stove")
 
+# Two explicit actions as requested
 col_req, col_csv = st.columns(2)
-request_clicked = col_req.button("Solicitar")
-uploaded_file = col_csv.file_uploader("Elegir CSV de Google Trends", type=["csv", "tsv"])
-upload_clicked = col_csv.button("Subir CSV")
+request_clicked = col_req.button("Request")
+uploaded_file = col_csv.file_uploader("Choose Google Trends CSV", type=["csv", "tsv"])
+upload_clicked = col_csv.button("Upload CSV")
 
-# Configuración fija para el modo de solicitud
-HL = "en-US"            # idioma de la interfaz para Trends
-TZ = 360                # parámetro de desfase horario (segundos)
-TIMEFRAME = "today 5-y" # últimos 5 años
-GEO = "US"              # Estados Unidos
+# Fixed config for Request mode
+HL = "en-US"            # interface language for Trends
+TZ = 360                # timezone offset param (per pytrends examples)
+TIMEFRAME = "today 5-y" # last 5 years
+GEO = "US"              # United States
 
-# Función para obtener tendencias de Google
+# ---------- Helpers ----------
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_trends(keyword: str) -> pd.DataFrame:
-    """Llamar a Google Trends a través de pytrends y devolver un dataframe limpio."""
-    from pytrends.request import TrendReq
-    pytrends = TrendReq(hl=HL, tz=TZ, timeout=(10, 25), retries=2, backoff_factor=0.1)
+    """Call Google Trends via pytrends and return a cleaned dataframe."""
+    pytrends = TrendReq(
+        hl=HL,
+        tz=TZ,
+        timeout=(10, 25),     # connect/read
+        retries=2,
+        backoff_factor=0.1,   # exponential backoff
+    )
     pytrends.build_payload([keyword], timeframe=TIMEFRAME, geo=GEO)
     df = pytrends.interest_over_time()
     if df.empty:
         return df
+    # Clean: drop last row and 'isPartial' per your workflow
     if len(df) > 0:
         df = df.iloc[:-1]
     if "isPartial" in df.columns:
         df = df.drop(columns=["isPartial"])
+    # Ensure datetime index
     df.index = pd.to_datetime(df.index)
     df = df.sort_index()
     return df
 
-# Función para analizar y predecir con Prophet
-def run_prophet(df: pd.DataFrame, series_name: str):
-    """Aplicar el modelo Prophet para predecir los próximos 6 meses."""
+def build_figure(df_plot: pd.DataFrame, title_kw: str) -> go.Figure:
+    """Build 4-panel Plotly figure."""
+    fig = make_subplots(
+        rows=4, cols=1, shared_xaxes=True,
+        subplot_titles=("Original", "Trend", "Seasonal", "Residual")
+    )
+    fig.add_trace(go.Scatter(x=df_plot["date"], y=df_plot["original"], name="Original", mode="lines"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df_plot["date"], y=df_plot["trend"],   name="Trend",   mode="lines"), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df_plot["date"], y=df_plot["seasonal"],name="Seasonal",mode="lines"), row=3, col=1)
+    fig.add_trace(go.Scatter(x=df_plot["date"], y=df_plot["remainder"],name="Residual",mode="lines"), row=4, col=1)
+    fig.add_hline(y=0, line_dash="dash", line_color="gray", row=3, col=1)
+    fig.add_hline(y=0, line_dash="dash", line_color="gray", row=4, col=1)
+    fig.update_layout(height=900, title_text=f"STL Decomposition — {title_kw} — Google Trends (US, last 5y)")
+    return fig
+
+def _clean_keyword_label(raw: str) -> str:
+    """Normalize series label like 'beef tallow for skin: (Estados Unidos)' -> 'beef tallow for skin (United States/Estados Unidos)' without trailing colon artifacts."""
+    label = raw.strip()
+    # Remove duplicate spaces and trailing colon
+    label = re.sub(r":\s*$", "", label)
+    # Replace ':\s*(' with ' ('
+    label = re.sub(r":\s*\(", " (", label)
+    return label
+
+def parse_trends_csv(file_bytes: bytes) -> tuple[pd.DataFrame, str]:
+    """
+    Parse a Google Trends CSV (en or es).
+    Returns (df, series_label) where df has a DatetimeIndex and a single numeric column.
+    """
+    text = file_bytes.decode("utf-8-sig", errors="replace")
+    # Find the header line by scanning until we see a row whose first cell is Week/Semana/Date/Fecha
+    lines = [ln for ln in text.splitlines() if ln.strip() != ""]
+    header_idx = -1
+    for i, ln in enumerate(lines):
+        # Try commas first; if only one col, try semicolon and tab
+        for sep in [",", ";", "\t"]:
+            parts = [p.strip() for p in ln.split(sep)]
+            if len(parts) >= 2:
+                if "date" in parts[0].lower():
+                    header_idx = i
+                    delimiter = sep
+                    break
+        if header_idx != -1:
+            break
+
+    if header_idx == -1:
+        raise ValueError("Could not locate a header row (expected columns like Week/Semana/Date/Fecha).")
+
+    # Rebuild the CSV from header onward and let pandas parse
+    content = "\n".join(lines[header_idx:])
+    df_raw = pd.read_csv(io.StringIO(content), sep=None, engine="python")
+
+    # Identify date column name (en/es)
+    date_candidates = [c for c in df_raw.columns if c.strip().lower() in {"week", "semana", "date", "fecha"}]
+    if not date_candidates:
+        raise ValueError("Date column not found (looking for Week/Semana/Date/Fecha).")
+    date_col = date_candidates[0]
+
+    # Identify the keyword series column: the one that isn't the date
+    value_cols = [c for c in df_raw.columns if c != date_col]
+    if not value_cols:
+        raise ValueError("Value column not found (expected a keyword like 'beef tallow for skin: (United States)').")
+
+    # If multiple columns exist, take the first non-empty numeric-like column
+    chosen = None
+    for col in value_cols:
+        non_na = pd.to_numeric(df_raw[col], errors="coerce")
+        if non_na.notna().sum() > 0:
+            chosen = col
+            break
+    if chosen is None:
+        # Fallback: take the first value column
+        chosen = value_cols[0]
+
+    series_label = _clean_keyword_label(str(chosen))
+
+    # Build normalized dataframe
+    df = pd.DataFrame({
+        "date": pd.to_datetime(df_raw[date_col], errors="coerce"),
+        series_label: pd.to_numeric(df_raw[chosen], errors="coerce"),
+    }).dropna(subset=["date"]).sort_values("date")
+
+    # Some exports may contain future/partial last rows; drop trailing NaN or duplicates
+    df = df.dropna(subset=[series_label])
+
+    # Use date as index to match fetch_trends() shape
+    df = df.set_index("date")
+
+    return df, series_label
+
+def run_prophet_forecast(df: pd.DataFrame, series_name: str):
+    """Run Prophet forecasting for the next 6 months."""
     if df.empty:
-        st.warning("No hay datos disponibles después del análisis. Verifique el archivo o la palabra clave.")
-        return
+        st.warning("No data available after parsing. Please verify the file or keyword.")
+        st.stop()
 
     if series_name not in df.columns:
-        st.error(f"La columna '{series_name}' no se encuentra en el conjunto de datos.")
-        return
+        st.error(f"Column '{series_name}' not found in the dataset.")
+        st.stop()
 
-    df_prophet = df[[series_name]].reset_index()
+    df_prophet = df.reset_index()[['date', series_name]]
     df_prophet.columns = ['ds', 'y']
-    df_prophet['ds'] = pd.to_datetime(df_prophet['ds'])
 
-    model = Prophet(weekly_seasonality=True, yearly_seasonality=True)
-    model.add_country_holidays(country_name='US')
+    # Instantiate Prophet model
+    model = Prophet(weekly_seasonality=True, holidays=Prophet.make_holidays_df(year_list=[2025], country='US'))
+    
+    # Fit the model
     model.fit(df_prophet)
 
+    # Make a future dataframe for 6 months
     future = model.make_future_dataframe(df_prophet, periods=26, freq='W')
+
+    # Forecast
     forecast = model.predict(future)
 
-    # Gráfica de la predicción
+    # Plot the forecast
     fig = model.plot(forecast)
-    st.plotly_chart(fig)
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Show the forecast components
+    fig2 = model.plot_components(forecast)
+    st.plotly_chart(fig2, use_container_width=True)
 
-    # Componentes de la predicción
-    st.subheader("Componentes de la predicción")
-    fig_components = model.plot_components(forecast)
-    st.plotly_chart(fig_components)
+    # Display forecasted data
+    st.markdown(f"### Forecast for the next 6 months")
+    st.dataframe(forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']], use_container_width=True)
 
-    # Descarga de los resultados
-    st.download_button(
-        label="Descargar resultados",
-        data=forecast.to_csv(index=False).encode('utf-8'),
-        file_name=f'forecast_{series_name}.csv',
-        mime='text/csv'
-    )
-
-# Función para analizar datos semanales
-def weekly_analysis(df: pd.DataFrame, series_name: str):
-    """Análisis de la estacionalidad semanal."""
-    df['week'] = df.index.isocalendar().week
-    weekly_avg = df.groupby('week')[series_name].mean().reset_index()
-
-    fig = px.line(weekly_avg, x='week', y=series_name, title='Promedio semanal')
-    st.plotly_chart(fig)
-
-# Controladores de ejecución
+# ---------- Execution controllers ----------
 def run_request_mode():
     if not kw.strip():
-        st.error("Por favor, ingrese una palabra clave para usar el modo de solicitud.")
-        return
-    with st.spinner("Obteniendo datos de Google Trends…"):
+        st.error("Please enter a keyword to use Request mode.")
+        st.stop()
+    with st.spinner("Fetching Google Trends…"):
         try:
             df = fetch_trends(kw.strip())
         except Exception as e:
-            st.error(f"Error al obtener datos de Google Trends: {e}")
-            return
+            st.error(f"Error fetching data from Google Trends: {e}")
+            st.info("Tip: pin urllib3<2 and try again if you see 'method_whitelist' errors.")
+            st.stop()
     if df.empty:
-        st.warning("No se devolvieron datos de Google Trends para esta palabra clave.")
-        return
+        st.warning("No data returned by Google Trends for this keyword/timeframe/geo.")
+        st.stop()
 
-    series_name = kw.strip()
-    if series_name not in df.columns:
-        st.error(f"La columna '{series_name}' no se encuentra en los resultados de Trends.")
-        return
+    # Series selection follows the exact column typed by user
+    col_name = kw.strip()
+    if col_name not in df.columns:
+        st.error(f"Column '{col_name}' not found in Trends result.")
+        st.stop()
 
-    run_prophet(df, series_name)
-    weekly_analysis(df, series_name)
+    run_prophet_forecast(df, col_name)
 
 def run_upload_mode():
     if uploaded_file is None:
-        st.error("Por favor, elija un archivo CSV exportado desde Google Trends.")
-        return
+        st.error("Please choose a CSV file exported from Google Trends.")
+        st.stop()
     try:
-        with st.spinner("Analizando CSV…"):
+        with st.spinner("Parsing CSV…"):
             file_bytes = uploaded_file.read()
-            df_csv = pd.read_csv(io.BytesIO(file_bytes))
-            df_csv['date'] = pd.to_datetime(df_csv['date'])
-            df_csv.set_index('date', inplace=True)
+            df_csv, series_label = parse_trends_csv(file_bytes)
     except Exception as e:
-        st.error(f"Error al analizar el CSV: {e}")
-        return
+        st.error(f"Failed to parse CSV: {e}")
+        st.stop()
 
-    series_label = df_csv.columns[0]  # Asumimos que solo hay una columna de datos
-    run_prophet(df_csv, series_label)
-    weekly_analysis(df_csv, series_label)
+    # For display, keep the label from the CSV header (keyword + country)
+    run_prophet_forecast(df_csv, series_label)
 
-# Ejecutar según la acción del usuario
+# Trigger actions
 if request_clicked:
     run_request_mode()
 elif upload_clicked:
     run_upload_mode()
 
-# Pie de página
+# ---------- Footer ----------
 st.markdown(
     """
     <small>
-    Fuente de datos: Google Trends a través de <code>pytrends</code> • Predicción: <code>Prophet</code> • Gráficos: Plotly • Hospedado en Streamlit Community Cloud
+    Data source: Google Trends via <code>pytrends</code> • Forecasting: <code>Prophet</code> • Charts: Plotly • Host: Streamlit Community Cloud
     </small>
     """, unsafe_allow_html=True
 )
